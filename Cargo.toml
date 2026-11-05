@@ -1,0 +1,36 @@
+[package]
+name = "narrow-ptr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Ulquiorra <contact@ulquiorra.dev>"]
+license = "MIT OR Apache-2.0"
+description = "Position-independent relative and narrow pointer types for zero-copy mmap, IPC, and memory-efficient data structures"
+repository = "https://github.com/ulquiorracode/narrow-ptr-rs"
+homepage = "https://github.com/ulquiorracode/narrow-ptr-rs"
+readme = "README.md"
+keywords = ["pointer", "relative-pointer", "zero-copy", "mmap", "no-std"]
+categories = ["data-structures", "no-std", "memory-management", "embedded"]
+
+[dependencies]
+serde = { version = "1.0", default-features = false, optional = true }
+zerocopy = { version = "0.8", default-features = false, features = ["derive"], optional = true }
+
+[dev-dependencies]
+criterion = "0.8"
+
+[features]
+default = []
+std = []
+serde = ["dep:serde"]
+zerocopy = ["dep:zerocopy"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
