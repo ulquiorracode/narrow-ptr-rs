@@ -4,7 +4,7 @@
 //! IPC, and cache-friendly data structures.
 //!
 //! Conforms to the "Scrooge" Systems Mindset:
-//! - Replaces 64-bit absolute pointers with compact relative displacements (e.g. `i32` or `i16`).
+//! - Replaces 64-bit absolute pointers with compact relative displacements (e.g. `i32`, `i16`, or `odd_int::I24`).
 //! - Guarantees position independence: structures can be directly dumped to disk or shared across
 //!   processes without pointer swizzling.
 
@@ -13,8 +13,13 @@
 #[cfg(feature = "std")]
 extern crate std;
 
+pub mod offset;
 pub mod ptr;
+pub mod scaled;
+
+pub use offset::Offset;
 pub use ptr::RelPtr;
+pub use scaled::ScaledRelPtr;
 
 #[cfg(test)]
 mod tests {
@@ -78,6 +83,66 @@ mod tests {
         unsafe {
             let target_ref = buf.ptr.resolve_within(arena_bytes);
             assert_eq!(target_ref, Some(&1337));
+        }
+    }
+
+    #[cfg(feature = "odd-int")]
+    #[test]
+    fn test_narrow_ptr_with_odd_int_i24() {
+        use odd_int::I24;
+
+        #[repr(C, packed)]
+        #[derive(Clone, Copy)]
+        struct DenseItem {
+            id: u16,
+            ptr: RelPtr<DenseItem, I24>,
+        }
+
+        assert_eq!(size_of::<RelPtr<DenseItem, I24>>(), 3);
+        assert_eq!(size_of::<DenseItem>(), 5);
+
+        let mut item1 = DenseItem {
+            id: 10,
+            ptr: RelPtr::from_raw_offset(I24::ZERO),
+        };
+        let item2 = DenseItem {
+            id: 20,
+            ptr: RelPtr::from_raw_offset(I24::ZERO),
+        };
+
+        item1.ptr = RelPtr::new(&item1.ptr, &item2);
+
+        unsafe {
+            let id = core::ptr::read_unaligned(core::ptr::addr_of!((*item1.ptr.as_ptr()).id));
+            assert_eq!(id, 20);
+        }
+    }
+
+    #[test]
+    fn test_scaled_rel_ptr() {
+        #[repr(C, align(4))]
+        struct Target {
+            val: u32,
+        }
+
+        #[repr(C, align(4))]
+        struct Container {
+            first: Target,
+            second: Target,
+            ptr: ScaledRelPtr<Target, i16, 2>,
+        }
+
+        let mut c = Container {
+            first: Target { val: 111 },
+            second: Target { val: 222 },
+            ptr: ScaledRelPtr::from_raw_offset(0),
+        };
+
+        c.ptr = ScaledRelPtr::new(&c.ptr, &c.second);
+
+        unsafe {
+            let resolved = &*c.ptr.as_ptr();
+            assert_eq!(resolved.val, 222);
         }
     }
 }
