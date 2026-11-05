@@ -291,6 +291,7 @@ dependencies = [
 [[package]]
 name = "odd-int"
 version = "0.1.0"
+source = "git+https://github.com/ulquiorracode/odd-int-rs.git?branch=dev#12623859becf6218e8aa87ae22e6d893aff0e1e4"
 
 [[package]]
 name = "oorandom"

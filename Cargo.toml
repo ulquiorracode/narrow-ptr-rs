@@ -13,13 +13,13 @@ keywords = ["pointer", "relative-pointer", "zero-copy", "mmap", "no-std"]
 categories = ["data-structures", "no-std", "memory-management", "embedded"]
 
 [dependencies]
-odd-int = { path = "../odd-int-rs", default-features = false, optional = true }
+odd-int = { git = "https://github.com/ulquiorracode/odd-int-rs.git", branch = "dev", default-features = false, optional = true }
 serde = { version = "1.0", default-features = false, optional = true }
 zerocopy = { version = "0.8", default-features = false, features = ["derive"], optional = true }
 
 [dev-dependencies]
 criterion = "0.8"
-odd-int = { path = "../odd-int-rs" }
+odd-int = { git = "https://github.com/ulquiorracode/odd-int-rs.git", branch = "dev" }
 
 [[bench]]
 name = "ptr_comparison"
