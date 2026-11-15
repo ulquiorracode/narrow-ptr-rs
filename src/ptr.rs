@@ -65,11 +65,9 @@ impl<T, I: Offset> RelPtr<T, I> {
     /// the calculated address points to a valid, properly aligned instance of `T`.
     #[inline(always)]
     pub unsafe fn as_ptr(&self) -> *const T {
-        // SAFETY: Pointer offset within caller-guaranteed valid range.
-        unsafe {
-            let base = self as *const _ as *const u8;
-            base.offset(self.offset.to_isize()) as *const T
-        }
+        // SAFETY: wrapping_offset computes the address without in-bounds LLVM provenance UB hazards.
+        let base = self as *const _ as *const u8;
+        base.wrapping_offset(self.offset.to_isize()) as *const T
     }
 
     /// Resolves a mutable raw pointer to `T`.
@@ -79,29 +77,64 @@ impl<T, I: Offset> RelPtr<T, I> {
     /// the calculated address points to a valid, properly aligned, mutable instance of `T`.
     #[inline(always)]
     pub unsafe fn as_mut_ptr(&mut self) -> *mut T {
-        // SAFETY: Pointer offset within caller-guaranteed valid range.
-        unsafe {
-            let base = self as *mut _ as *mut u8;
-            base.offset(self.offset.to_isize()) as *mut T
-        }
+        // SAFETY: wrapping_offset computes the address without in-bounds LLVM provenance UB hazards.
+        let base = self as *mut _ as *mut u8;
+        base.wrapping_offset(self.offset.to_isize()) as *mut T
     }
 
     /// Safely dereferences the relative pointer within a bounded arena/buffer slice.
     ///
-    /// Returns `Some(&'a T)` if the resolved target lies strictly within the byte bounds of `arena`.
+    /// Returns `Some(&'a T)` if the resolved target lies strictly within the byte bounds of `arena`
+    /// and matches the memory alignment required by `T`.
     ///
     /// # Safety
-    /// Target data in `arena` at the offset must be an initialized, valid instance of `T` with correct alignment.
+    /// Target data in `arena` at the offset must be an initialized, valid instance of `T`.
     pub unsafe fn resolve_within<'a>(&self, arena: &'a [u8]) -> Option<&'a T> {
         let target_ptr = unsafe { self.as_ptr() };
         let target_addr = target_ptr as usize;
         let arena_start = arena.as_ptr() as usize;
-        let arena_end = arena_start + arena.len();
+
+        let align = core::mem::align_of::<T>();
+        if target_addr % align != 0 {
+            return None;
+        }
 
         let target_size = core::mem::size_of::<T>();
-        if target_addr >= arena_start && target_addr + target_size <= arena_end {
-            // SAFETY: Caller guarantees valid data initialization; bounds check guarantees non-dangling arena reference.
+        let target_end = target_addr.checked_add(target_size)?;
+        let arena_end = arena_start.checked_add(arena.len())?;
+
+        if target_addr >= arena_start && target_end <= arena_end {
+            // SAFETY: Caller guarantees valid data initialization; bounds & alignment checks guarantee non-dangling, aligned reference.
             Some(unsafe { &*target_ptr })
+        } else {
+            None
+        }
+    }
+
+    /// Safely dereferences the mutable relative pointer within a bounded arena/buffer slice.
+    ///
+    /// Returns `Some(&'a mut T)` if the resolved target lies strictly within the byte bounds of `arena`
+    /// and matches the memory alignment required by `T`.
+    ///
+    /// # Safety
+    /// Target data in `arena` at the offset must be an initialized, valid instance of `T`.
+    pub unsafe fn resolve_within_mut<'a>(&mut self, arena: &'a mut [u8]) -> Option<&'a mut T> {
+        let target_ptr = unsafe { self.as_mut_ptr() };
+        let target_addr = target_ptr as usize;
+        let arena_start = arena.as_ptr() as usize;
+
+        let align = core::mem::align_of::<T>();
+        if target_addr % align != 0 {
+            return None;
+        }
+
+        let target_size = core::mem::size_of::<T>();
+        let target_end = target_addr.checked_add(target_size)?;
+        let arena_end = arena_start.checked_add(arena.len())?;
+
+        if target_addr >= arena_start && target_end <= arena_end {
+            // SAFETY: Caller guarantees valid data initialization; bounds & alignment checks guarantee non-dangling, aligned reference.
+            Some(unsafe { &mut *target_ptr })
         } else {
             None
         }
