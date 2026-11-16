@@ -145,4 +145,47 @@ mod tests {
             assert_eq!(resolved.val, 222);
         }
     }
+
+    #[test]
+    fn test_resolve_within_mut_and_alignment() {
+        #[repr(C, align(8))]
+        struct AlignedTarget {
+            val: u64,
+        }
+
+        #[repr(C, align(8))]
+        struct Container {
+            target: AlignedTarget,
+            ptr: RelPtr<AlignedTarget, i32>,
+        }
+
+        let mut c = Container {
+            target: AlignedTarget { val: 42 },
+            ptr: RelPtr::from_raw_offset(0),
+        };
+        c.ptr = RelPtr::new(&c.ptr, &c.target);
+
+        let size = core::mem::size_of::<Container>();
+        let arena_bytes =
+            unsafe { core::slice::from_raw_parts_mut(&mut c as *mut _ as *mut u8, size) };
+
+        unsafe {
+            let res_mut = c.ptr.resolve_within_mut(arena_bytes);
+            assert!(res_mut.is_some());
+            let r = res_mut.unwrap();
+            assert_eq!(r.val, 42);
+            r.val = 84;
+        }
+
+        assert_eq!(c.target.val, 84);
+
+        // Test unaligned pointer rejection: offset target by 1 byte
+        let unaligned_ptr: RelPtr<AlignedTarget, i32> =
+            RelPtr::from_raw_offset(c.ptr.raw_offset() + 1);
+        let arena_bytes_immut =
+            unsafe { core::slice::from_raw_parts(&c as *const _ as *const u8, size) };
+        unsafe {
+            assert!(unaligned_ptr.resolve_within(arena_bytes_immut).is_none());
+        }
+    }
 }
