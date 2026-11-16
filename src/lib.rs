@@ -159,33 +159,75 @@ mod tests {
             ptr: RelPtr<AlignedTarget, i32>,
         }
 
-        let mut c = Container {
-            target: AlignedTarget { val: 42 },
-            ptr: RelPtr::from_raw_offset(0),
-        };
-        c.ptr = RelPtr::new(&c.ptr, &c.target);
-
-        let size = core::mem::size_of::<Container>();
-        let arena_bytes =
-            unsafe { core::slice::from_raw_parts_mut(&mut c as *mut _ as *mut u8, size) };
-
+        let mut arena = [0u8; 64];
+        let c_ptr = arena.as_mut_ptr() as *mut Container;
         unsafe {
-            let res_mut = c.ptr.resolve_within_mut(arena_bytes);
+            (*c_ptr).target.val = 42;
+            (*c_ptr).ptr = RelPtr::new(&(*c_ptr).ptr, &(*c_ptr).target);
+
+            // Access ptr via raw pointer so as not to alias with &mut arena
+            let rel_ptr = &mut (*c_ptr).ptr;
+            let res_mut = rel_ptr.resolve_within_mut(&mut arena);
             assert!(res_mut.is_some());
             let r = res_mut.unwrap();
             assert_eq!(r.val, 42);
             r.val = 84;
+            assert_eq!((*c_ptr).target.val, 84);
         }
-
-        assert_eq!(c.target.val, 84);
 
         // Test unaligned pointer rejection: offset target by 1 byte
         let unaligned_ptr: RelPtr<AlignedTarget, i32> =
-            RelPtr::from_raw_offset(c.ptr.raw_offset() + 1);
-        let arena_bytes_immut =
-            unsafe { core::slice::from_raw_parts(&c as *const _ as *const u8, size) };
+            unsafe { RelPtr::from_raw_offset((*c_ptr).ptr.raw_offset() + 1) };
         unsafe {
-            assert!(unaligned_ptr.resolve_within(arena_bytes_immut).is_none());
+            assert!(unaligned_ptr.resolve_within(&arena).is_none());
+        }
+    }
+
+    #[test]
+    fn test_rel_ptr_rebase() {
+        #[repr(C)]
+        struct Block {
+            target: u32,
+            ptr: RelPtr<u32, i32>,
+        }
+
+        let mut b1 = Block {
+            target: 12345,
+            ptr: RelPtr::from_raw_offset(0),
+        };
+        b1.ptr = RelPtr::new(&b1.ptr, &b1.target);
+
+        let old_addr = &b1.ptr as *const _;
+        let mut b2 = b1;
+        let new_addr = &b2.ptr as *const _;
+
+        b2.ptr.rebase(old_addr, new_addr);
+        unsafe {
+            assert_eq!(*b2.ptr.as_ptr(), 12345);
+        }
+    }
+
+    #[test]
+    fn test_scaled_rel_ptr_rebase() {
+        #[repr(C, align(4))]
+        struct Block {
+            target: u32,
+            ptr: ScaledRelPtr<u32, i32, 2>,
+        }
+
+        let mut b1 = Block {
+            target: 54321,
+            ptr: ScaledRelPtr::from_raw_offset(0),
+        };
+        b1.ptr = ScaledRelPtr::new(&b1.ptr, &b1.target);
+
+        let old_addr = &b1.ptr as *const _;
+        let mut b2 = b1;
+        let new_addr = &b2.ptr as *const _;
+
+        b2.ptr.rebase(old_addr, new_addr);
+        unsafe {
+            assert_eq!(*b2.ptr.as_ptr(), 54321);
         }
     }
 }

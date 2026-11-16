@@ -14,9 +14,23 @@ use core::marker::PhantomData;
 ///    pointer metadata in node structures.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(transparent)
+)]
+#[cfg_attr(
+    feature = "zerocopy",
+    derive(
+        zerocopy::IntoBytes,
+        zerocopy::FromBytes,
+        zerocopy::KnownLayout,
+        zerocopy::Immutable
+    )
+)]
 pub struct RelPtr<T, I = i32> {
     offset: I,
-    _marker: PhantomData<*const T>,
+    _marker: PhantomData<fn() -> *const T>,
 }
 
 impl<T, I: Copy> RelPtr<T, I> {
@@ -58,6 +72,32 @@ impl<T, I: Offset> RelPtr<T, I> {
         I::from_isize(diff).map(Self::from_raw_offset)
     }
 
+    /// Rebases this relative pointer when the containing struct/buffer has moved in memory.
+    ///
+    /// Given the old address of `self` (`old_from`) and the new address of `self` (`new_from`),
+    /// this adjusts the stored offset so that it continues pointing to the original target.
+    ///
+    /// Returns `None` if the new displacement exceeds the range of `I`.
+    pub fn try_rebase(&mut self, old_from: *const Self, new_from: *const Self) -> Option<()> {
+        let old_addr = old_from as usize as isize;
+        let new_addr = new_from as usize as isize;
+        let current_offset = self.offset.to_isize();
+        let target_addr = old_addr.checked_add(current_offset)?;
+        let new_diff = target_addr.checked_sub(new_addr)?;
+        let new_offset = I::from_isize(new_diff)?;
+        self.offset = new_offset;
+        Some(())
+    }
+
+    /// Rebases this relative pointer when the containing struct/buffer has moved in memory.
+    ///
+    /// # Panics
+    /// Panics if the rebased displacement exceeds the range of `I`.
+    pub fn rebase(&mut self, old_from: *const Self, new_from: *const Self) {
+        self.try_rebase(old_from, new_from)
+            .expect("rebased relative pointer displacement exceeds offset range");
+    }
+
     /// Resolves the raw pointer to `T`.
     ///
     /// # Safety
@@ -65,9 +105,9 @@ impl<T, I: Offset> RelPtr<T, I> {
     /// the calculated address points to a valid, properly aligned instance of `T`.
     #[inline(always)]
     pub unsafe fn as_ptr(&self) -> *const T {
-        // SAFETY: wrapping_offset computes the address without in-bounds LLVM provenance UB hazards.
-        let base = self as *const _ as *const u8;
-        base.wrapping_offset(self.offset.to_isize()) as *const T
+        let base_addr = self as *const _ as usize;
+        let target_addr = (base_addr as isize).wrapping_add(self.offset.to_isize()) as usize;
+        target_addr as *const T
     }
 
     /// Resolves a mutable raw pointer to `T`.
@@ -77,12 +117,12 @@ impl<T, I: Offset> RelPtr<T, I> {
     /// the calculated address points to a valid, properly aligned, mutable instance of `T`.
     #[inline(always)]
     pub unsafe fn as_mut_ptr(&mut self) -> *mut T {
-        // SAFETY: wrapping_offset computes the address without in-bounds LLVM provenance UB hazards.
-        let base = self as *mut _ as *mut u8;
-        base.wrapping_offset(self.offset.to_isize()) as *mut T
+        let base_addr = self as *mut _ as usize;
+        let target_addr = (base_addr as isize).wrapping_add(self.offset.to_isize()) as usize;
+        target_addr as *mut T
     }
 
-    /// Safely dereferences the relative pointer within a bounded arena/buffer slice.
+    /// Bounds- and alignment-checked dereferencing of the relative pointer within a bounded arena/buffer slice.
     ///
     /// Returns `Some(&'a T)` if the resolved target lies strictly within the byte bounds of `arena`
     /// and matches the memory alignment required by `T`.
@@ -104,14 +144,16 @@ impl<T, I: Offset> RelPtr<T, I> {
         let arena_end = arena_start.checked_add(arena.len())?;
 
         if target_addr >= arena_start && target_end <= arena_end {
-            // SAFETY: Caller guarantees valid data initialization; bounds & alignment checks guarantee non-dangling, aligned reference.
-            Some(unsafe { &*target_ptr })
+            let offset_in_arena = target_addr - arena_start;
+            let ptr = unsafe { arena.as_ptr().add(offset_in_arena) as *const T };
+            // SAFETY: Caller guarantees valid data initialization; bounds & alignment checks guarantee non-dangling, aligned reference with arena's provenance.
+            Some(unsafe { &*ptr })
         } else {
             None
         }
     }
 
-    /// Safely dereferences the mutable relative pointer within a bounded arena/buffer slice.
+    /// Bounds- and alignment-checked dereferencing of the mutable relative pointer within a bounded arena/buffer slice.
     ///
     /// Returns `Some(&'a mut T)` if the resolved target lies strictly within the byte bounds of `arena`
     /// and matches the memory alignment required by `T`.
@@ -133,8 +175,10 @@ impl<T, I: Offset> RelPtr<T, I> {
         let arena_end = arena_start.checked_add(arena.len())?;
 
         if target_addr >= arena_start && target_end <= arena_end {
-            // SAFETY: Caller guarantees valid data initialization; bounds & alignment checks guarantee non-dangling, aligned reference.
-            Some(unsafe { &mut *target_ptr })
+            let offset_in_arena = target_addr - arena_start;
+            let ptr = unsafe { arena.as_mut_ptr().add(offset_in_arena) as *mut T };
+            // SAFETY: Caller guarantees valid data initialization; bounds & alignment checks guarantee non-dangling, aligned reference with arena's provenance.
+            Some(unsafe { &mut *ptr })
         } else {
             None
         }

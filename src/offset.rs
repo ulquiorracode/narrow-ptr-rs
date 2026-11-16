@@ -17,7 +17,7 @@ macro_rules! impl_primitive_offset {
             impl Offset for $ty {
                 #[inline(always)]
                 fn to_isize(self) -> isize {
-                    self as isize
+                    isize::try_from(self).expect("offset exceeds target isize range")
                 }
 
                 #[inline(always)]
@@ -40,6 +40,7 @@ impl<const BITS: usize, const BYTES: usize> Offset for odd_int::Int<BITS, BYTES>
 
     #[inline(always)]
     fn from_isize(offset: isize) -> Option<Self> {
-        Self::from_i64(offset as i64).ok()
+        let val = i64::try_from(offset).ok()?;
+        Self::from_i64(val).ok()
     }
 }
