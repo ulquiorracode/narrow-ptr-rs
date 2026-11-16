@@ -17,7 +17,7 @@ Conforms to the **"Scrooge" Systems Mindset** (zero memory waste, mechanical sym
 - **Pointer Compression (50–75% Memory Reduction)**:
   - `RelPtr<T, i32>`: 4 bytes (addresses displacements up to $\pm 2$ GiB)
   - `RelPtr<T, i16>`: 2 bytes (addresses displacements up to $\pm 32$ KiB)
-- **Context-Bounded Safety (`resolve_within`)**: Safe dereferencing with boundary verification against arena slices.
+- **Context-Bounded Safety (`resolve_within`)**: Bounds and alignment-checked dereferencing with boundary verification against arena slices.
 - **`#![no_std]` by Default**: Usable in embedded firmware, OS kernels, and WASM sandbox runtimes.
 
 ---
@@ -33,15 +33,23 @@ struct Node {
     next: RelPtr<Node, i32>,
 }
 
-let mut first = Node { value: 1, next: RelPtr::from_raw_offset(0) };
-let second = Node { value: 2, next: RelPtr::from_raw_offset(0) };
+// In a contiguous arena or buffer:
+let mut arena = [
+    Node { value: 1, next: RelPtr::from_raw_offset(0) },
+    Node { value: 2, next: RelPtr::from_raw_offset(0) },
+];
 
-// Wire relative pointer
-first.next = RelPtr::new(&first.next, &second);
+// Wire relative pointer between elements in the same allocation
+arena[0].next = RelPtr::new(&arena[0].next, &arena[1]);
 
-// Dereference
+// Dereference safely within the arena bounds
+let arena_bytes = unsafe {
+    core::slice::from_raw_parts(arena.as_ptr() as *const u8, core::mem::size_of_val(&arena))
+};
+
 unsafe {
-    assert_eq!((*first.next.as_ptr()).value, 2);
+    let next_node = arena[0].next.resolve_within(arena_bytes).expect("in bounds");
+    assert_eq!(next_node.value, 2);
 }
 ```
 
