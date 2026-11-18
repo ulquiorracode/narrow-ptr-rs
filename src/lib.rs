@@ -1,13 +1,4 @@
-//! # narrow-ptr
-//!
-//! Position-independent relative and narrow pointer types for zero-copy memory mapping (`mmap`),
-//! IPC, and cache-friendly data structures.
-//!
-//! Conforms to the "Scrooge" Systems Mindset:
-//! - Replaces 64-bit absolute pointers with compact relative displacements (e.g. `i32`, `i16`, or `odd_int::I24`).
-//! - Guarantees position independence: structures can be directly dumped to disk or shared across
-//!   processes without pointer swizzling.
-
+#![doc = include_str!("../README.md")]
 #![no_std]
 
 #[cfg(feature = "std")]
@@ -37,21 +28,23 @@ mod tests {
         assert_eq!(size_of::<RelPtr<u32, i32>>(), 4);
         assert_eq!(size_of::<RelPtr<u32, i16>>(), 2);
 
-        let mut node1 = Node {
-            value: 42,
-            next: RelPtr::from_raw_offset(0),
-        };
-        let node2 = Node {
-            value: 99,
-            next: RelPtr::from_raw_offset(0),
-        };
+        let mut nodes = [
+            Node {
+                value: 42,
+                next: RelPtr::from_raw_offset(0),
+            },
+            Node {
+                value: 99,
+                next: RelPtr::from_raw_offset(0),
+            },
+        ];
 
-        // Wire node1 -> node2
-        node1.next = RelPtr::new(&node1.next, &node2);
+        // Wire node 0 -> node 1 within contiguous allocation
+        nodes[0].next = RelPtr::new(&nodes[0].next, &nodes[1]);
 
         // Resolve pointer safely
         unsafe {
-            let resolved = &*node1.next.as_ptr();
+            let resolved = &*nodes[0].next.as_ptr();
             assert_eq!(resolved.value, 99);
         }
     }
@@ -101,19 +94,21 @@ mod tests {
         assert_eq!(size_of::<RelPtr<DenseItem, I24>>(), 3);
         assert_eq!(size_of::<DenseItem>(), 5);
 
-        let mut item1 = DenseItem {
-            id: 10,
-            ptr: RelPtr::from_raw_offset(I24::ZERO),
-        };
-        let item2 = DenseItem {
-            id: 20,
-            ptr: RelPtr::from_raw_offset(I24::ZERO),
-        };
+        let mut items = [
+            DenseItem {
+                id: 10,
+                ptr: RelPtr::from_raw_offset(I24::ZERO),
+            },
+            DenseItem {
+                id: 20,
+                ptr: RelPtr::from_raw_offset(I24::ZERO),
+            },
+        ];
 
-        item1.ptr = RelPtr::new(&item1.ptr, &item2);
+        items[0].ptr = RelPtr::new(&items[0].ptr, &items[1]);
 
         unsafe {
-            let id = core::ptr::read_unaligned(core::ptr::addr_of!((*item1.ptr.as_ptr()).id));
+            let id = core::ptr::read_unaligned(core::ptr::addr_of!((*items[0].ptr.as_ptr()).id));
             assert_eq!(id, 20);
         }
     }
@@ -154,37 +149,63 @@ mod tests {
         }
 
         #[repr(C, align(8))]
-        struct Container {
-            target: AlignedTarget,
-            ptr: RelPtr<AlignedTarget, i32>,
+        struct AlignedArena([u8; 64]);
+
+        let mut arena = AlignedArena([0u8; 64]);
+        let target_ptr = arena.0.as_mut_ptr() as *mut AlignedTarget;
+        unsafe {
+            (*target_ptr).val = 42;
         }
 
-        let mut arena = [0u8; 64];
-        let c_ptr = arena.as_mut_ptr() as *mut Container;
-        unsafe {
-            (*c_ptr).target.val = 42;
-            (*c_ptr).ptr = RelPtr::new(&(*c_ptr).ptr, &(*c_ptr).target);
+        let mut rel_ptr = RelPtr::<AlignedTarget, i32>::from_raw_offset(0);
+        rel_ptr = RelPtr::new(&rel_ptr, target_ptr);
 
-            // Access ptr via raw pointer so as not to alias with &mut arena
-            let rel_ptr = &mut (*c_ptr).ptr;
-            let res_mut = rel_ptr.resolve_within_mut(&mut arena);
+        unsafe {
+            let res_mut = rel_ptr.resolve_within_mut(&mut arena.0);
             assert!(res_mut.is_some());
             let r = res_mut.unwrap();
             assert_eq!(r.val, 42);
             r.val = 84;
-            assert_eq!((*c_ptr).target.val, 84);
         }
+
+        let updated_val = unsafe { (*(arena.0.as_ptr() as *const AlignedTarget)).val };
+        assert_eq!(updated_val, 84);
 
         // Test unaligned pointer rejection: offset target by 1 byte
         let unaligned_ptr: RelPtr<AlignedTarget, i32> =
-            unsafe { RelPtr::from_raw_offset((*c_ptr).ptr.raw_offset() + 1) };
+            RelPtr::from_raw_offset(rel_ptr.raw_offset() + 1);
         unsafe {
-            assert!(unaligned_ptr.resolve_within(&arena).is_none());
+            assert!(unaligned_ptr.resolve_within(&arena.0).is_none());
         }
     }
 
     #[test]
     fn test_rel_ptr_rebase() {
+        #[repr(C)]
+        struct Arena {
+            target: u32,
+            p1: RelPtr<u32, i32>,
+            p2: RelPtr<u32, i32>,
+        }
+        let mut arena = Arena {
+            target: 12345,
+            p1: RelPtr::from_raw_offset(0),
+            p2: RelPtr::from_raw_offset(0),
+        };
+        arena.p1 = RelPtr::new(&arena.p1, &arena.target);
+        arena.p2 = arena.p1;
+
+        let old_addr = &arena.p1 as *const _;
+        let new_addr = &arena.p2 as *const _;
+
+        arena.p2.rebase(old_addr, new_addr);
+        unsafe {
+            assert_eq!(*arena.p2.as_ptr(), 12345);
+        }
+    }
+
+    #[test]
+    fn test_rel_ptr_block_move_invariance() {
         #[repr(C)]
         struct Block {
             target: u32,
@@ -197,11 +218,10 @@ mod tests {
         };
         b1.ptr = RelPtr::new(&b1.ptr, &b1.target);
 
-        let old_addr = &b1.ptr as *const _;
-        let mut b2 = b1;
-        let new_addr = &b2.ptr as *const _;
-
-        b2.ptr.rebase(old_addr, new_addr);
+        // Moving the whole self-contained block preserves relative offset without rebasing
+        let b2 = b1;
+        // Expose new allocation address so exposed-provenance resolution can target it
+        let _ = &b2 as *const Block as usize;
         unsafe {
             assert_eq!(*b2.ptr.as_ptr(), 12345);
         }
@@ -210,24 +230,40 @@ mod tests {
     #[test]
     fn test_scaled_rel_ptr_rebase() {
         #[repr(C, align(4))]
-        struct Block {
+        struct Arena {
             target: u32,
-            ptr: ScaledRelPtr<u32, i32, 2>,
+            p1: ScaledRelPtr<u32, i32, 2>,
+            p2: ScaledRelPtr<u32, i32, 2>,
         }
-
-        let mut b1 = Block {
+        let mut arena = Arena {
             target: 54321,
-            ptr: ScaledRelPtr::from_raw_offset(0),
+            p1: ScaledRelPtr::from_raw_offset(0),
+            p2: ScaledRelPtr::from_raw_offset(0),
         };
-        b1.ptr = ScaledRelPtr::new(&b1.ptr, &b1.target);
+        arena.p1 = ScaledRelPtr::new(&arena.p1, &arena.target);
+        arena.p2 = arena.p1;
 
-        let old_addr = &b1.ptr as *const _;
-        let mut b2 = b1;
-        let new_addr = &b2.ptr as *const _;
+        let old_addr = &arena.p1 as *const _;
+        let new_addr = &arena.p2 as *const _;
 
-        b2.ptr.rebase(old_addr, new_addr);
+        arena.p2.rebase(old_addr, new_addr);
         unsafe {
-            assert_eq!(*b2.ptr.as_ptr(), 54321);
+            assert_eq!(*arena.p2.as_ptr(), 54321);
         }
+    }
+
+    #[test]
+    fn test_scaled_rel_ptr_alignment_validation() {
+        #[repr(C, align(8))]
+        struct Align8(u64);
+
+        let val = Align8(999);
+        let ptr_slot = ScaledRelPtr::<Align8, i32, 1>::from_raw_offset(0);
+        // Valid creation when target is properly aligned
+        assert!(ScaledRelPtr::try_new(&ptr_slot, &val).is_some());
+
+        // Unaligned target rejection (e.g. pointer with odd address)
+        let unaligned_raw = ((&val as *const _ as usize) + 1) as *const Align8;
+        assert!(ScaledRelPtr::try_new(&ptr_slot, unaligned_raw).is_none());
     }
 }
