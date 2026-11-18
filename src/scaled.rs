@@ -28,8 +28,11 @@ use core::marker::PhantomData;
 )]
 pub struct ScaledRelPtr<T, I = i32, const SHIFT: usize = 2> {
     offset: I,
-    _marker: PhantomData<fn() -> *const T>,
+    _marker: PhantomData<*const T>,
 }
+
+unsafe impl<T: Send, I: Send, const SHIFT: usize> Send for ScaledRelPtr<T, I, SHIFT> {}
+unsafe impl<T: Sync, I: Sync, const SHIFT: usize> Sync for ScaledRelPtr<T, I, SHIFT> {}
 
 impl<T, I: Copy, const SHIFT: usize> ScaledRelPtr<T, I, SHIFT> {
     /// Creates a new `ScaledRelPtr` from a raw scaled offset.
@@ -62,6 +65,10 @@ impl<T, I: Offset, const SHIFT: usize> ScaledRelPtr<T, I, SHIFT> {
         if SHIFT >= usize::BITS as usize {
             return None;
         }
+        let align = core::mem::align_of::<T>();
+        if (to as usize) % align != 0 {
+            return None;
+        }
         let from_addr = from as usize as isize;
         let to_addr = to as usize as isize;
         let diff = to_addr - from_addr;
@@ -87,6 +94,10 @@ impl<T, I: Offset, const SHIFT: usize> ScaledRelPtr<T, I, SHIFT> {
         let new_addr = new_from as usize as isize;
         let current_byte_diff = self.offset.to_isize().checked_shl(SHIFT as u32)?;
         let target_addr = old_addr.checked_add(current_byte_diff)?;
+        let align = core::mem::align_of::<T>();
+        if (target_addr as usize) % align != 0 {
+            return None;
+        }
         let new_diff = target_addr.checked_sub(new_addr)?;
         let step = 1isize.checked_shl(SHIFT as u32)?;
         if new_diff % step != 0 {
@@ -108,7 +119,14 @@ impl<T, I: Offset, const SHIFT: usize> ScaledRelPtr<T, I, SHIFT> {
         );
     }
 
-    /// Resolves the raw pointer to `T`.
+    /// Resolves the raw pointer to `T` using exposed provenance.
+    ///
+    /// # Memory Model & Provenance
+    /// This method computes the absolute target address from `self`'s address and the scaled relative displacement,
+    /// restoring the pointer via exposed provenance (`target_addr as *const T`).
+    ///
+    /// For strict bounds checking and single-allocation provenance, prefer [`ScaledRelPtr::resolve_within`],
+    /// which derives the reference directly from the enclosing arena slice.
     ///
     /// # Safety
     /// Caller must ensure that `self` is placed at a valid memory location and that
@@ -124,7 +142,7 @@ impl<T, I: Offset, const SHIFT: usize> ScaledRelPtr<T, I, SHIFT> {
         target_addr as *const T
     }
 
-    /// Resolves a mutable raw pointer to `T`.
+    /// Resolves a mutable raw pointer to `T` using exposed provenance.
     ///
     /// # Safety
     /// Caller must ensure that `self` is placed at a valid memory location and that
@@ -166,7 +184,7 @@ impl<T, I: Offset, const SHIFT: usize> ScaledRelPtr<T, I, SHIFT> {
 
         if target_addr >= arena_start && target_end <= arena_end {
             let offset_in_arena = target_addr - arena_start;
-            let ptr = unsafe { arena.as_ptr().add(offset_in_arena) as *const T };
+            let ptr = unsafe { arena.as_ptr().add(offset_in_arena).cast::<T>() };
             // SAFETY: Caller guarantees valid data initialization; bounds & alignment checks guarantee non-dangling, aligned reference with arena's provenance.
             Some(unsafe { &*ptr })
         } else {
@@ -181,8 +199,8 @@ impl<T, I: Offset, const SHIFT: usize> ScaledRelPtr<T, I, SHIFT> {
     ///
     /// # Safety
     /// Target data in `arena` at the offset must be an initialized, valid instance of `T`.
-    pub unsafe fn resolve_within_mut<'a>(&mut self, arena: &'a mut [u8]) -> Option<&'a mut T> {
-        let target_ptr = unsafe { self.as_mut_ptr() };
+    pub unsafe fn resolve_within_mut<'a>(&self, arena: &'a mut [u8]) -> Option<&'a mut T> {
+        let target_ptr = unsafe { self.as_ptr() };
         if target_ptr.is_null() {
             return None;
         }
@@ -200,7 +218,7 @@ impl<T, I: Offset, const SHIFT: usize> ScaledRelPtr<T, I, SHIFT> {
 
         if target_addr >= arena_start && target_end <= arena_end {
             let offset_in_arena = target_addr - arena_start;
-            let ptr = unsafe { arena.as_mut_ptr().add(offset_in_arena) as *mut T };
+            let ptr = unsafe { arena.as_mut_ptr().add(offset_in_arena).cast::<T>() };
             // SAFETY: Caller guarantees valid data initialization; bounds & alignment checks guarantee non-dangling, aligned reference with arena's provenance.
             Some(unsafe { &mut *ptr })
         } else {
